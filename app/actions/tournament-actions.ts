@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache"
 import redis, { safeRedis } from "@/lib/redis"
 import { cookies } from "next/headers"
 import { v4 as uuidv4 } from "uuid"
+import { TOURNAMENT_DURATION_MS } from "@/lib/scheduler"
 
 // Key prefixes for Redis
 const TOURNAMENT_KEY = "photo_tournament"
@@ -426,5 +427,75 @@ export async function storeVote(userId: string, vote: any) {
   // Make sure vote is serialized before storing
   const serializedVote = typeof vote === 'string' ? vote : JSON.stringify(vote)
   await redis.lpush(voteKey, serializedVote)
+}
+
+// Add this function to end a tournament
+export async function endTournament(): Promise<TournamentState | null> {
+  const tournamentData = await getTournamentState()
+  if (!tournamentData) return null
+  
+  // Mark tournament as inactive
+  tournamentData.isActive = false
+  tournamentData.tournamentComplete = true
+  
+  // Determine the overall winner if not already set
+  if (!tournamentData.tournamentComplete) {
+    // Find the matchup with the highest votes in the last round
+    const lastRoundMatchups = tournamentData.bracket.filter(m => m.round === tournamentData.currentRound)
+    let winningMatchup = lastRoundMatchups[0]
+    
+    for (const matchup of lastRoundMatchups) {
+      if (matchup.player1Votes + matchup.player2Votes > 
+          winningMatchup.player1Votes + winningMatchup.player2Votes) {
+        winningMatchup = matchup
+      }
+    }
+    
+    // Determine winner of the winning matchup
+    if (winningMatchup.player1Votes > winningMatchup.player2Votes) {
+      winningMatchup.winner = winningMatchup.player1
+    } else if (winningMatchup.player2Votes > winningMatchup.player1Votes) {
+      winningMatchup.winner = winningMatchup.player2
+    } else {
+      // In case of a tie, choose randomly
+      winningMatchup.winner = Math.random() < 0.5 ? winningMatchup.player1 : winningMatchup.player2
+    }
+    
+    winningMatchup.completed = true
+  }
+  
+  await createOrUpdateTournament(tournamentData)
+  revalidatePath("/")
+  
+  return tournamentData
+}
+
+// Add this function to check if a tournament has expired
+export async function checkTournamentExpiration(): Promise<boolean> {
+  const tournamentData = await getTournamentState()
+  if (!tournamentData || !tournamentData.isActive) return false
+  
+  const startedAt = new Date(tournamentData.startedAt).getTime()
+  const now = Date.now()
+  const elapsed = now - startedAt
+  
+  if (elapsed >= TOURNAMENT_DURATION_MS) {
+    await endTournament()
+    return true
+  }
+  
+  return false
+}
+
+// Add this function to get the tournament winner
+export async function getTournamentWinner(): Promise<any | null> {
+  const tournamentData = await getTournamentState()
+  if (!tournamentData || !tournamentData.tournamentComplete) return null
+  
+  // Find the final matchup
+  const finalRound = Math.max(...tournamentData.bracket.map(m => m.round))
+  const finalMatchup = tournamentData.bracket.find(m => m.round === finalRound)
+  
+  return finalMatchup?.winner || null
 }
 

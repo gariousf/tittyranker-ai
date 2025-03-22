@@ -1,10 +1,11 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import { TournamentScheduler } from "./tournament-scheduler"
 
 export const metadata: Metadata = {
-  title: 'v0 App',
-  description: 'Created with v0',
-  generator: 'v0.dev',
+  title: 'Titties App',
+  description: 'Created for titties',
+  generator: 'titties.fun',
 }
 
 export default function RootLayout({
@@ -14,7 +15,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <TournamentScheduler />
+        {children}
+      </body>
     </html>
   )
 }

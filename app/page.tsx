@@ -25,8 +25,12 @@ import {
   advanceToNextRound,
   recordCasualVote,
   getUserVoteHistory,
+  getTournamentWinner,
+  checkTournamentExpiration
 } from "@/app/actions/tournament-actions"
 import { useRouter } from "next/navigation"
+import { shouldStartTournament } from "@/lib/scheduler"
+import { TwitterShareButton } from "@/components/twitter-share-button"
 
 export default function PhotoRanker() {
   const [photos, setPhotos] = useState(photoData)
@@ -45,6 +49,7 @@ export default function PhotoRanker() {
   const [userVotes, setUserVotes] = useState<any[]>([])
   const { toast } = useToast()
   const router = useRouter()
+  const [winner, setWinner] = useState(null)
 
   // Get a random pair of images for casual voting
   const getRandomPair = () => {
@@ -58,6 +63,45 @@ export default function PhotoRanker() {
 
     return [first, second] as [number, number]
   }
+
+  // Move the server function calls to useEffect
+  useEffect(() => {
+    const initializePage = async () => {
+      // Check if current tournament has expired
+      await checkTournamentExpiration()
+      
+      // Get current tournament state
+      const tournamentData = await getTournamentState()
+      
+      // Check if we should start a new tournament
+      const shouldStart = await shouldStartTournament()
+      
+      // Get tournament winner if tournament is complete
+      const winner = tournamentData?.tournamentComplete 
+        ? await getTournamentWinner() 
+        : null
+        
+      // Update your state variables with the fetched data
+      if (tournamentData && tournamentData.isActive) {
+        setTournamentMode(true)
+        setTournamentBracket(tournamentData.bracket)
+        setTournamentRound(tournamentData.currentRound)
+        setCurrentMatchup(tournamentData.currentMatchup)
+        setRoundComplete(tournamentData.roundComplete)
+        setTournamentComplete(tournamentData.tournamentComplete)
+      }
+      
+      // Set winner state if available
+      if (winner) {
+        // Set some state to display the winner
+        setWinner(winner)
+      }
+      
+      setIsLoading(false)
+    }
+    
+    initializePage()
+  }, [])
 
   // Initialize and fetch tournament state
   useEffect(() => {
@@ -690,6 +734,27 @@ export default function PhotoRanker() {
           <UserVoteHistory votes={userVotes} />
         </TabsContent>
       </Tabs>
+
+      {/* Display winner and Twitter share button if tournament is complete */}
+      {winner && (
+        <div className="mt-8 p-6 bg-slate-100 rounded-lg">
+          <h2 className="text-2xl font-bold mb-4">Tournament Winner!</h2>
+          <div className="mb-4">
+            {/* Display winner photo */}
+            <img 
+              src={winner.url} 
+              alt={winner.description} 
+              className="rounded-md max-h-80 object-contain"
+            />
+            <p className="mt-2 text-lg">{winner.description}</p>
+          </div>
+          
+          <TwitterShareButton 
+            winner={winner} 
+            tournamentDate={winner.tournamentDate || new Date().toISOString()} 
+          />
+        </div>
+      )}
     </main>
   )
 }
