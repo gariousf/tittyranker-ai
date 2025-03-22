@@ -8,9 +8,14 @@ import { TOURNAMENT_DURATION_MS } from "@/lib/scheduler"
 
 // Key prefixes for Redis
 const TOURNAMENT_KEY = "photo_tournament"
+const TOURNAMENT_HISTORY_KEY = "photo_tournament_history"
 const USER_KEY = "photo_user"
 const ACTIVE_USERS_KEY = "photo_active_users"
 const USER_VOTES_KEY = "photo_user_votes"
+const PHOTO_WINS_KEY = "photo_wins"
+
+// Maximum number of tournament history entries to keep
+const MAX_TOURNAMENT_HISTORY = 10
 
 // Types
 export interface TournamentState {
@@ -115,64 +120,94 @@ export async function getTournamentState(): Promise<TournamentState | null> {
   return tournamentData as TournamentState | null
 }
 
-// Create or update tournament
+// Create or update tournament with better error handling
 export async function createOrUpdateTournament(tournamentData: TournamentState): Promise<TournamentState> {
-  await redis.set(TOURNAMENT_KEY, tournamentData)
-  revalidatePath("/")
-  return tournamentData
+  try {
+    // Use safeRedis to ensure proper serialization
+    await safeRedis.set(TOURNAMENT_KEY, tournamentData)
+    
+    // If this is a new tournament, update the winner's stats if tournament is complete
+    if (tournamentData.tournamentComplete && tournamentData.bracket.length > 0) {
+      const finalRound = Math.max(...tournamentData.bracket.map(m => m.round))
+      const finalMatchup = tournamentData.bracket.find(m => m.round === finalRound)
+      
+      if (finalMatchup?.winner) {
+        // Increment the winner's win count
+        await redis.hincrby(PHOTO_WINS_KEY, finalMatchup.winner.id.toString(), 1)
+      }
+    }
+    
+    revalidatePath("/")
+    return tournamentData
+  } catch (error) {
+    console.error("Error saving tournament data:", error)
+    throw new Error("Failed to save tournament data")
+  }
 }
 
-// Initialize a new tournament
+// Initialize a new tournament with better error handling
 export async function initializeTournament(photos: any[]): Promise<TournamentState> {
-  const user = await getUserSession()
+  try {
+    const user = await getUserSession()
 
-  // Shuffle photos for random seeding
-  const shuffledPhotos = [...photos].sort(() => Math.random() - 0.5)
+    // Shuffle photos for random seeding
+    const shuffledPhotos = [...photos].sort(() => Math.random() - 0.5)
 
-  // Create first round matchups
-  const matchups: MatchupProps[] = []
-  for (let i = 0; i < shuffledPhotos.length; i += 2) {
-    if (i + 1 < shuffledPhotos.length) {
-      matchups.push({
-        round: 1,
-        match: matchups.length + 1,
-        player1: shuffledPhotos[i],
-        player2: shuffledPhotos[i + 1],
-        player1Votes: 0,
-        player2Votes: 0,
-        votedUsers: [],
-        winner: null,
-        completed: false,
-      })
-    } else {
-      // If odd number of photos, give one a bye
-      matchups.push({
-        round: 1,
-        match: matchups.length + 1,
-        player1: shuffledPhotos[i],
-        player2: null, // Bye
-        player1Votes: 0,
-        player2Votes: 0,
-        votedUsers: [],
-        winner: shuffledPhotos[i], // Auto-advance
-        completed: true,
-      })
+    // Create first round matchups
+    const matchups: MatchupProps[] = []
+    for (let i = 0; i < shuffledPhotos.length; i += 2) {
+      if (i + 1 < shuffledPhotos.length) {
+        matchups.push({
+          round: 1,
+          match: matchups.length + 1,
+          player1: shuffledPhotos[i],
+          player2: shuffledPhotos[i + 1],
+          player1Votes: 0,
+          player2Votes: 0,
+          votedUsers: [],
+          winner: null,
+          completed: false,
+        })
+      } else {
+        // If odd number of photos, give one a bye
+        matchups.push({
+          round: 1,
+          match: matchups.length + 1,
+          player1: shuffledPhotos[i],
+          player2: null, // Bye
+          player1Votes: 0,
+          player2Votes: 0,
+          votedUsers: [],
+          winner: shuffledPhotos[i], // Auto-advance
+          completed: true,
+        })
+      }
     }
-  }
 
-  const tournamentData: TournamentState = {
-    isActive: true,
-    startedBy: user.id,
-    startedAt: new Date().toISOString(),
-    bracket: matchups,
-    currentRound: 1,
-    currentMatchup: 0,
-    roundComplete: false,
-    tournamentComplete: false,
-  }
+    const tournamentData: TournamentState = {
+      isActive: true,
+      startedBy: user.id,
+      startedAt: new Date().toISOString(),
+      bracket: matchups,
+      currentRound: 1,
+      currentMatchup: 0,
+      roundComplete: false,
+      tournamentComplete: false,
+    }
 
-  await createOrUpdateTournament(tournamentData)
-  return tournamentData
+    // End any existing tournament before creating a new one
+    const existingTournament = await getTournamentState()
+    if (existingTournament && existingTournament.isActive) {
+      await endTournament()
+    }
+
+    // Create the new tournament
+    await createOrUpdateTournament(tournamentData)
+    return tournamentData
+  } catch (error) {
+    console.error("Error initializing tournament:", error)
+    throw new Error("Failed to initialize tournament")
+  }
 }
 
 // Vote for a matchup
@@ -464,6 +499,10 @@ export async function endTournament(): Promise<TournamentState | null> {
     winningMatchup.completed = true
   }
   
+  // Save to tournament history before updating
+  await saveTournamentToHistory(tournamentData)
+  
+  // Update the tournament state
   await createOrUpdateTournament(tournamentData)
   revalidatePath("/")
   
@@ -497,5 +536,97 @@ export async function getTournamentWinner(): Promise<any | null> {
   const finalMatchup = tournamentData.bracket.find(m => m.round === finalRound)
   
   return finalMatchup?.winner || null
+}
+
+// Save tournament to history when it ends
+async function saveTournamentToHistory(tournament: TournamentState): Promise<void> {
+  // Add timestamp for when it was archived
+  const tournamentWithArchiveTime = {
+    ...tournament,
+    archivedAt: new Date().toISOString()
+  }
+  
+  // Use safeRedis to ensure proper serialization
+  await safeRedis.lpush(TOURNAMENT_HISTORY_KEY, tournamentWithArchiveTime)
+  
+  // Keep only the most recent tournaments
+  await redis.ltrim(TOURNAMENT_HISTORY_KEY, 0, MAX_TOURNAMENT_HISTORY - 1)
+}
+
+// Get tournament history
+export async function getTournamentHistory(limit = MAX_TOURNAMENT_HISTORY): Promise<TournamentState[]> {
+  const history = await redis.lrange(TOURNAMENT_HISTORY_KEY, 0, limit - 1)
+  
+  return history.map(entry => {
+    if (typeof entry === 'string') {
+      try {
+        return JSON.parse(entry)
+      } catch (error) {
+        console.error('Error parsing tournament history:', error)
+        return null
+      }
+    }
+    return entry
+  }).filter(Boolean)
+}
+
+// Clean up old data (can be called periodically)
+export async function cleanupOldData(): Promise<void> {
+  try {
+    // Clean up inactive users (older than 1 day)
+    const activeUsers = (await redis.hgetall(ACTIVE_USERS_KEY)) as Record<string, string>
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    
+    for (const [id, lastActive] of Object.entries(activeUsers)) {
+      if (lastActive < oneDayAgo) {
+        await redis.hdel(ACTIVE_USERS_KEY, id)
+      }
+    }
+    
+    // Keep only recent tournament history
+    await redis.ltrim(TOURNAMENT_HISTORY_KEY, 0, MAX_TOURNAMENT_HISTORY - 1)
+    
+    // Other cleanup tasks as needed
+  } catch (error) {
+    console.error("Error cleaning up old data:", error)
+  }
+}
+
+// Get tournament statistics
+export async function getTournamentStats(): Promise<any> {
+  try {
+    // Get tournament history
+    const history = await getTournamentHistory()
+    
+    // Calculate statistics
+    const totalTournaments = history.length
+    const totalVotes = history.reduce((sum, tournament) => {
+      return sum + tournament.bracket.reduce((matchupSum, matchup) => {
+        return matchupSum + matchup.player1Votes + matchup.player2Votes
+      }, 0)
+    }, 0)
+    
+    // Get most popular photos
+    const photoWins = (await redis.hgetall(PHOTO_WINS_KEY)) as Record<string, string>
+    const topPhotos = Object.entries(photoWins)
+      .map(([id, wins]) => ({ id: Number(id), wins: Number(wins) }))
+      .sort((a, b) => b.wins - a.wins)
+      .slice(0, 5)
+    
+    return {
+      totalTournaments,
+      totalVotes,
+      topPhotos,
+      lastTournament: history[0] || null
+    }
+  } catch (error) {
+    console.error("Error getting tournament stats:", error)
+    return {
+      totalTournaments: 0,
+      totalVotes: 0,
+      topPhotos: [],
+      lastTournament: null
+    }
+  }
 }
 

@@ -31,6 +31,7 @@ import {
 import { useRouter } from "next/navigation"
 import { shouldStartTournament } from "@/lib/scheduler"
 import { TwitterShareButton } from "@/components/twitter-share-button"
+import { TournamentSchedule } from "@/components/tournament-schedule"
 
 export default function PhotoRanker() {
   const [photos, setPhotos] = useState(photoData)
@@ -50,6 +51,7 @@ export default function PhotoRanker() {
   const { toast } = useToast()
   const router = useRouter()
   const [winner, setWinner] = useState(null)
+  const [tournamentStartTime, setTournamentStartTime] = useState<string | undefined>(undefined)
 
   // Get a random pair of images for casual voting
   const getRandomPair = () => {
@@ -95,6 +97,11 @@ export default function PhotoRanker() {
       if (winner) {
         // Set some state to display the winner
         setWinner(winner)
+      }
+      
+      // Set tournament start time
+      if (tournamentData) {
+        setTournamentStartTime(tournamentData.startedAt)
       }
       
       setIsLoading(false)
@@ -462,6 +469,11 @@ export default function PhotoRanker() {
           <RefreshCcw className="h-4 w-4" /> Refresh
         </Button>
       </div>
+
+      <TournamentSchedule 
+        tournamentStartTime={tournamentStartTime} 
+        isActive={tournamentMode && !tournamentComplete} 
+      />
 
       {tournamentMode && (
         <Alert className="mb-6">
